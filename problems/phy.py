@@ -7,7 +7,7 @@ import pickle
 from typing import NamedTuple
 from utils.boolmask import mask_long2bool, mask_long_scatter
 from utils import get_co_len, get_kmer
-from seq_embedding.seq2vec import preprocess_seq
+# from seq_embedding.seq2vec import preprocess_seq
 from Bio.SeqIO.FastaIO import SimpleFastaParser
 from gensim.models.doc2vec import Doc2Vec
 

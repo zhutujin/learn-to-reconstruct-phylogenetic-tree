@@ -1,5 +1,6 @@
 import os
 import random
+import numpy as np
 import subprocess
 from tempfile import TemporaryDirectory
 from Bio.Align import MultipleSeqAlignment
@@ -12,6 +13,7 @@ from Bio.SeqRecord import SeqRecord
 from Bio.Align import MultipleSeqAlignment
 import torch
 from tqdm import tqdm
+from sklearn.metrics.pairwise import cosine_distances
 
 from phylo import TreeIO
 from utils import PAMLml, get_kmer, torch_load_cpu, gurobi_tsp, co2tree, cluster_co2tree
@@ -134,8 +136,26 @@ def megacc(megacc_cmd, method_type, mao_file, testset_dir, num_testset, size_tes
                                        )
 
 
+def megacc_dist(megacc_cmd, method_type, mao_file, testset_dir, num_testset, size_testset):
+    for i in range(num_testset):
+        print('testset[{}] Inferring tree from distance matrix ...'.format(i+1))
+        for j in range(size_testset):
+            dist_file = os.path.join(testset_dir, str(i+1), '%d_dist.meg' % (j+1))
+            out_file = os.path.join(testset_dir, str(i+1), '%d_dist_%s.nwk' % (j+1, method_type))
+
+            out_bytes = subprocess.run([megacc_cmd,
+                                        '-a', mao_file,
+                                        '-d', dist_file,
+                                        '-o', out_file,
+                                        '-n',
+                                        '-s'],
+                                        stdout=subprocess.DEVNULL,
+                                        # stderr=subprocess.DEVNULL
+                                       )
+
+
 def infer_tree_rl(model_path, node_dim, embedding_dim, n_encode_layers,
-             testset_dir, num_testset, size_testset, k_mer=6):
+             testset_dir, num_testset, size_testset, k_mer=6, out_filename=''):
     model = AttentionModel(node_dim=node_dim, embedding_dim=embedding_dim, n_encode_layers=n_encode_layers)
     print('  [*] Loading data from {}'.format(model_path))
     load_data = torch_load_cpu(model_path)
@@ -147,7 +167,7 @@ def infer_tree_rl(model_path, node_dim, embedding_dim, n_encode_layers,
         print('testset[{}] Inferring tree by rl ...'.format(i+1))
         for j in range(size_testset):
             msa_file = os.path.join(testset_dir, str(i+1), '%d_rn.fasta' % (j+1))
-            out_file = os.path.join(testset_dir, str(i+1), '%d_rl.nwk' % (j+1))
+            out_file = os.path.join(testset_dir, str(i+1), '%d_rl%s.nwk' % (j+1, out_filename))
             with open(msa_file, 'rt') as f_read:
                 seq_list = [seq for _, seq in SimpleFastaParser(f_read)]
             vecs = [get_kmer(seq, k_mer=k_mer) for seq in seq_list]
@@ -179,9 +199,39 @@ def infer_tree_tsp(testset_dir, num_testset, size_testset, k_mer=6):
             TreeIO.write([tree], out_file, 'newick')
 
 
-def compare_lnlk(paml_path, method_types, testset_dir, num_testset, size_testset, silent=False):
+def kmer2distance(testset_dir, num_testset, size_testset, size_phy, k_mer=6):
+    for i in range(num_testset):
+        print('testset[{}] calculate the distance matrix ...'.format(i+1))
+        for j in range(size_testset):
+            msa_file = os.path.join(testset_dir, str(i+1), '%d_rn.fasta' % (j+1))
+            out_file = os.path.join(testset_dir, str(i+1), '%d_dist.meg' % (j+1))
+            with open(msa_file, 'rt') as f_read:
+                seq_list = [seq for _, seq in SimpleFastaParser(f_read)]
+            vecs = np.array([get_kmer(seq, k_mer=k_mer) for seq in seq_list])
+            cos_dist = cosine_distances(vecs, vecs)
+
+            with open(out_file, 'wt') as f_write:
+                # mega distance format
+                f_write.write('#mega\n')
+                f_write.write('!TITLE cosine distance matrix of k-mer vectors;\n')
+                f_write.write('!Format DataType=distance NTaxa={};\n'.format(size_phy))
+                f_write.write('\n')
+
+                f_write.write('\n'.join('#{}'.format(k+1) for k in range(size_phy)))
+                f_write.write('\n\n\n')
+
+                # distance matrix
+                for r in range(1, size_phy):
+                    f_write.write(' '.join(str(a) for a in cos_dist[r, :r]))
+                    f_write.write('\n')
+
+
+
+def compare_lnlk(paml_path, method_types, testset_dir, num_testset, size_testset, out_filename=None, silent=False):
+    if out_filename is None:
+        out_filename = 'lnlk.csv'
     paml = PAMLml(paml_command=paml_path, del_tmp_dir=True)
-    total_result_file = os.path.join(testset_dir, 'lnlk.csv')
+    total_result_file = os.path.join(testset_dir, out_filename)
     total_contents = []
 
     for i in range(num_testset):
@@ -189,7 +239,7 @@ def compare_lnlk(paml_path, method_types, testset_dir, num_testset, size_testset
 
         total_content = []
 
-        result_file = os.path.join(testset_dir, str(i+1), 'lnlk.csv')
+        result_file = os.path.join(testset_dir, str(i+1), out_filename)
         with open(result_file, 'wt') as f_write:
             for method_type in method_types:
                 s = 0
@@ -221,10 +271,12 @@ def compare_lnlk(paml_path, method_types, testset_dir, num_testset, size_testset
             f_write.write('{},{}\n'.format(method_type, ','.join(total_contents[idx])))
 
 
-def compare_rf_distance(ref, method_types, testset_dir, num_testset, size_testset, size_phy, silent=False):
+def compare_rf_distance(ref, method_types, testset_dir, num_testset, size_testset, size_phy, out_filename=None, silent=False):
+    if out_filename is None:
+        out_filename = 'RF_dist.csv'
     # establish common taxon namespace
     tns = dendropy.TaxonNamespace()
-    total_result_file = os.path.join(testset_dir, 'RF_dist.csv')
+    total_result_file = os.path.join(testset_dir, out_filename)
     total_contents = []
 
     for i in range(num_testset):
@@ -235,7 +287,8 @@ def compare_rf_distance(ref, method_types, testset_dir, num_testset, size_testse
             ref_tree_file = os.path.join(testset_dir, str(i+1), '%d_%s.nwk' % (j+1, ref))
             ref_trees.append(dendropy.Tree.get(path=ref_tree_file, schema='newick',
                                                taxon_namespace=tns))
-        result_file = os.path.join(testset_dir, str(i+1), 'RF_dist.csv')
+
+        result_file = os.path.join(testset_dir, str(i+1), out_filename)
         with open(result_file, 'wt') as f_write:
             f_write.write('reference: {}\n'.format(ref))
             for method_type in method_types:
@@ -274,7 +327,7 @@ if __name__ == '__main__':
     #                          num_testset=num_testset, size_testset=size_testset, size_phy=size_phy)
     # rename_fasta(testset_dir, num_testset=num_testset, size_testset=size_testset)
 
-
+    ## infer kmer vector
     train_seq_file = '/data/ztj_data/rlphy/data/trainset/train.fasta'
     pickle_file = '/data/ztj_data/rlphy/data/trainset/k_mer_6.pt'
     k_mer = 6
@@ -315,8 +368,65 @@ if __name__ == '__main__':
     # infer_tree_tsp(testset_dir, num_testset, size_testset, k_mer=k_mer)
 
 
-    # benchmark:
+    ## Benchmark 1:  RL vs NJ, UPGMA and ME
     paml_path = '/data/ztj_data/rlphy/tools/paml4.9/bin/baseml'
-    compare_lnlk(paml_path, ['ref', 'rl', 'tsp', 'me', 'nj', 'upgma'], testset_dir, num_testset, size_testset)
-    # compare_rf_distance('ref', ['rl', 'tsp'], testset_dir, num_testset, size_testset, size_phy)
-    compare_rf_distance('ref', ['rl', 'tsp', 'me', 'nj', 'upgma'], testset_dir, num_testset, size_testset, size_phy)
+    # compare_lnlk(paml_path, ['ref', 'rl', 'tsp', 'me', 'nj', 'upgma'], testset_dir, num_testset, size_testset)
+    # compare_rf_distance('ref', ['rl', 'tsp', 'me', 'nj', 'upgma'], testset_dir, num_testset, size_testset, size_phy)
+
+
+    ## Benchmark 2:  RL vs distance matrix based NJ, UPGMA and ME
+    # 1. calculate the k-mer distance matrix, and save as mega format.
+    # kmer2distance(testset_dir, num_testset, size_testset, size_phy)
+
+    # 2. infer tree by NJ, UPGMA, Minimum Evolution using k-mer distance matrix.
+    method_types = ['nj', 'upgma', 'me']
+    mao_files = [
+        '/data/ztj_data/rlphy/infer_NJ_distances.mao',
+        '/data/ztj_data/rlphy/infer_UPGMA_distances.mao',
+        '/data/ztj_data/rlphy/infer_ME_distances.mao'
+    ]
+    # for method_type, mao_file in zip(method_types, mao_files):
+    #     megacc_dist(megacc_cmd, method_type, mao_file, testset_dir, num_testset, size_testset)
+
+    # 3. compare nrf distances.
+    # compare_rf_distance('ref', ['rl', 'tsp', 'dist_nj', 'dist_upgma', 'dist_me'], 
+    #                     testset_dir, num_testset, size_testset, size_phy, out_filename='RF_dist_2.csv')
+
+    # 4. compare lnlk.
+    # compare_lnlk(paml_path, ['ref', 'rl', 'tsp', 'dist_nj', 'dist_upgma', 'dist_me'],
+    #              testset_dir, num_testset, size_testset, out_filename='lnlk_2.csv')
+
+
+    ## Benchmark 3:  results of RL in different parameters(k-mer size, embedding_dim and n_encode_layers)
+    # infer tree by RL (kmer == 6)
+    node_dim = 4 ** 6
+    embedding_dim_list = [128, 256, 512]
+    n_encode_layers_list = [2, 3, 4, 5]
+    model_filename = [
+        'run_20200529T101747',
+        'run_20200529T110049',
+        'run_20200529T114522',
+        'run_20200529T123106',
+        'run_20200529T131832',
+        'run_20200529T140217',
+        'run_20200529T144548',
+        'run_20200529T153044',
+        'run_20200529T161753',
+        'run_20200529T170233',
+        'run_20200529T174824',
+        'run_20200529T183735',
+    ]
+    # for i, embedding_dim in enumerate(embedding_dim_list):
+    #     for j, n_encode_layers in enumerate(n_encode_layers_list):
+    #         model_path = os.path.join('/data/ztj_data/rlphy/kmer6_models/phylo_15/',
+    #                                   model_filename[i*4+j], 'epoch-99.pt')
+    #         out_filename = '_{}_{}'.format(embedding_dim, n_encode_layers)
+    #         infer_tree_rl(model_path, node_dim, embedding_dim, n_encode_layers,
+    #                       testset_dir, num_testset, size_testset, k_mer=6, out_filename=out_filename)
+    
+    # compare nrf distances of different parameters
+    method_types = ['rl_{}_{}'.format(ed, nel) for ed in embedding_dim_list for nel in n_encode_layers_list]
+    for i, embedding_dim in enumerate(embedding_dim_list):
+        for j, n_encode_layers in enumerate(n_encode_layers_list):
+            compare_rf_distance('ref', method_types, testset_dir, num_testset,
+                                size_testset, size_phy, out_filename='RF_dist_3.csv')

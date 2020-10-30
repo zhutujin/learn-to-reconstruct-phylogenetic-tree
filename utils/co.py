@@ -5,7 +5,7 @@ import itertools
 import gurobipy as gp
 
 from phylo import Clade, Tree, TreeIO
-from seq_embedding import preprocess_seq
+# from seq_embedding import preprocess_seq
 
 import torch
 import torch.nn.functional as F
