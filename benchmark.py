@@ -13,7 +13,7 @@ from Bio.SeqRecord import SeqRecord
 from Bio.Align import MultipleSeqAlignment
 import torch
 from tqdm import tqdm
-from sklearn.metrics.pairwise import cosine_distances
+from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
 
 from phylo import TreeIO
 from utils import PAMLml, get_kmer, torch_load_cpu, gurobi_tsp, co2tree, cluster_co2tree
@@ -208,7 +208,7 @@ def kmer2distance(testset_dir, num_testset, size_testset, size_phy, k_mer=6):
             with open(msa_file, 'rt') as f_read:
                 seq_list = [seq for _, seq in SimpleFastaParser(f_read)]
             vecs = np.array([get_kmer(seq, k_mer=k_mer) for seq in seq_list])
-            cos_dist = cosine_distances(vecs, vecs)
+            dist = euclidean_distances(vecs, vecs)
 
             with open(out_file, 'wt') as f_write:
                 # mega distance format
@@ -222,7 +222,7 @@ def kmer2distance(testset_dir, num_testset, size_testset, size_phy, k_mer=6):
 
                 # distance matrix
                 for r in range(1, size_phy):
-                    f_write.write(' '.join(str(a) for a in cos_dist[r, :r]))
+                    f_write.write(' '.join(str(a) for a in dist[r, :r]))
                     f_write.write('\n')
 
 
@@ -316,6 +316,72 @@ def compare_rf_distance(ref, method_types, testset_dir, num_testset, size_testse
             f_write.write('{},{}\n'.format(method_type, ','.join(total_contents[idx])))
 
 
+def cal_tree_varience(tree, dist, k):
+    '''Calculate the proportion of explained variance, as given by a formula of Pruzanski,
+     Tversky and Caroll.
+     
+     see paper: Circular orders of tree metrics, and their uses for the reconstruction 
+     and fitting of phylogenetic trees'''
+    d = []
+    t = []
+    for i in range(k - 1):
+        for j in range(i + 1, k):
+            t.append(dist[i][j])
+            start = next(tree.find_clades(terminal=True, name=str(i+1)))
+            to = next(tree.find_clades(terminal=True, name=str(j+1)))
+            d.append(tree.distance(start, to))
+    d = np.array(d)
+    t = np.array(t)
+    # print(d)
+    # print(t)
+    # print()
+    d_mean = np.mean(d)
+    return 100.0 * (1.0 - (np.sum((d - t)**2) / np.sum((d - d_mean)**2)))
+
+
+def compare_variance(method_types, testset_dir, num_testset, size_testset, size_phy,
+                        out_filename=None, k_mer=6, silent=False):
+    if out_filename is None:
+        out_filename = 'variance.csv'
+
+    total_result_file = os.path.join(testset_dir, out_filename)
+    total_results = {method_type: [] for method_type in method_types}
+
+    for i in range(num_testset):
+        print('testset[{}] Calculating varience ...'.format(i+1))
+        results = {method_type: [] for method_type in method_types}
+
+        for j in range(size_testset):
+            # distance matrix
+            msa_file = os.path.join(testset_dir, str(i+1), '%d_rn.fasta' % (j+1))
+            with open(msa_file, 'rt') as f_read:
+                seq_list = [seq for _, seq in SimpleFastaParser(f_read)]
+            vecs = np.array([get_kmer(seq, k_mer=k_mer) for seq in seq_list])
+            dist = euclidean_distances(vecs, vecs)
+
+            for method_type in method_types:
+                tree_file = os.path.join(testset_dir, str(i+1), '%d_%s.nwk' % (j+1, method_type))
+                tree = TreeIO.read(tree_file, 'newick')
+                # print('i: {},j: {}, method_type: {}'.format(i, j, method_type))
+                var = cal_tree_varience(tree, dist, size_phy)
+                results[method_type].append(var)
+        
+        avg = {method_type: np.mean(results[method_type]) for method_type in method_types}
+        for method_type in method_types:
+            total_results[method_type].append(avg[method_type])
+
+        result_file = os.path.join(testset_dir, str(i+1), out_filename)
+        with open(result_file, 'wt') as f_write:
+            for method_type in method_types:
+                ss = ['{:.2f}'.format(num) for num in results[method_type]]
+                f_write.write('{},{}\n'.format(method_type, ','.join(ss)))
+        
+    with open(total_result_file, 'wt') as f_write:
+        for method_type in method_types:
+            ss = ['{:.2f}'.format(num) for num in total_results[method_type]]
+            f_write.write('{},{}\n'.format(method_type, ','.join(ss)))
+
+
 if __name__ == '__main__':
     seq_file = '/data/ztj_data/rlphy/data/sel03n_rm.fasta'
     trainset_dir = '/data/ztj_data/rlphy/data/trainset'
@@ -389,7 +455,7 @@ if __name__ == '__main__':
     #     megacc_dist(megacc_cmd, method_type, mao_file, testset_dir, num_testset, size_testset)
 
     # 3. compare nrf distances.
-    # compare_rf_distance('ref', ['rl', 'tsp', 'dist_nj', 'dist_upgma', 'dist_me'], 
+    # compare_rf_distance('ref', ['rl_128_2', 'tsp', 'dist_nj', 'dist_upgma', 'dist_me'], 
     #                     testset_dir, num_testset, size_testset, size_phy, out_filename='RF_dist_2.csv')
 
     # 4. compare lnlk.
@@ -424,9 +490,21 @@ if __name__ == '__main__':
     #         infer_tree_rl(model_path, node_dim, embedding_dim, n_encode_layers,
     #                       testset_dir, num_testset, size_testset, k_mer=6, out_filename=out_filename)
     
-    # compare nrf distances of different parameters
+    ## compare nrf distances of different parameters
     method_types = ['rl_{}_{}'.format(ed, nel) for ed in embedding_dim_list for nel in n_encode_layers_list]
-    for i, embedding_dim in enumerate(embedding_dim_list):
-        for j, n_encode_layers in enumerate(n_encode_layers_list):
-            compare_rf_distance('ref', method_types, testset_dir, num_testset,
-                                size_testset, size_phy, out_filename='RF_dist_3.csv')
+    method_types.extend(['tsp', 'dist_nj', 'dist_upgma', 'dist_me'])
+    compare_rf_distance('ref', method_types, testset_dir, num_testset,
+                        size_testset, size_phy, out_filename='RF_dist_3.csv')
+    
+    ## compare lnlk
+    compare_lnlk(paml_path, method_types, testset_dir, num_testset,
+                 size_testset, out_filename='lnlk_3.csv')
+
+
+    ## Benchmark 4: Calculate the proportion of explained variance
+    # embedding_dim_list = [128, 256, 512]
+    # n_encode_layers_list = [2, 3, 4, 5]
+    # method_types = ['rl_{}_{}'.format(ed, nel) for ed in embedding_dim_list for nel in n_encode_layers_list]
+    # method_types.extend(['dist_nj', 'dist_upgma', 'dist_me'])
+    # compare_variance(method_types, testset_dir, num_testset,
+    #                  size_testset, size_phy, out_filename='varience.csv')
