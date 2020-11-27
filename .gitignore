@@ -3,3 +3,4 @@ __pycache__/
 .ipynb_checkpoints/
 run.ipynb
 test.ipynb
+paml_tmp_dir/
