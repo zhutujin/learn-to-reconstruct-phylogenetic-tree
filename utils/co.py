@@ -14,12 +14,12 @@ from Bio.Alphabet import generic_dna
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.Align import MultipleSeqAlignment
-from scipy.spatial import distance_matrix, distance
+from sklearn.metrics.pairwise import cosine_distances
 
 
 def k_mer_dist(v1, v2):
-    return np.linalg.norm(v1 - v2)
-    # return 1 - np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    return np.linalg.norm(v1 - v2)  # Euclidean distance
+    # return 1.0 - np.dot(v1, v2.T) / (np.linalg.norm(v1) * np.linalg.norm(v2))  # cosine distance
 
 def delta(vecs, co, i):
     length = len(co)
@@ -35,7 +35,7 @@ def cluster_co2tree(kmer_vecs, circular_order):
         kmer_vecs: (phy_size, kmer_dim) -> list of numpy.array
         circular_order: (phy_size) -> list
     '''
-    assert len(kmer_vecs) == len(circular_order), 'size of vectors and co must be equal'
+    # assert len(kmer_vecs) == len(circular_order), 'size of vectors and co must be equal'
 
     co = circular_order
 
@@ -70,11 +70,11 @@ def cluster_co2tree(kmer_vecs, circular_order):
 
 
 def point_to_path_dist(x, y, z):
-    return (k_mer_dist(x, y) + k_mer_dist(x, z) - k_mer_dist(y, z)) / 2
+    return (k_mer_dist(x, y) + k_mer_dist(x, z) - k_mer_dist(y, z)) / 2.0
 
 
 def co2tree(vecs, circular_order):
-    assert len(vecs) == len(circular_order), 'size of vectors and co must be equal'
+    # assert len(vecs) == len(circular_order), 'size of vectors and co must be equal'
 
     co = circular_order
     
@@ -88,13 +88,17 @@ def co2tree(vecs, circular_order):
         clade_k_next = Clade(name=str(co[k+1]+1))
         path_k_to_1 = tree.get_path(clade_k)[::-1] + [tree.root]
         delta_k_next = point_to_path_dist(vecs[co[k]], vecs[co[0]], vecs[co[k+1]])
-        s = 0
-        i = 0
-        while i < len(path_k_to_1)-1:
-            s += path_k_to_1[i].branch_length
-            if s > delta_k_next:
-                break
+
+        if delta_k_next < 0:
+            raise ValueError('delta_k_next < 0')
+
+        s = 0.0
+        i = -1
+        while s < delta_k_next and i < len(path_k_to_1)-2:
             i += 1
+            s += path_k_to_1[i].branch_length
+            # if s > delta_k_next:
+            #     break
 
         if s > delta_k_next:
             clade_k_next.branch_length = point_to_path_dist(vecs[co[k+1]], vecs[co[0]], vecs[co[k]])
@@ -103,20 +107,28 @@ def co2tree(vecs, circular_order):
             path_k_to_1[i+1].clades.remove(path_k_to_1[i])
             path_k_to_1[i+1].clades.append(inter_clade)
         else:
-            i -= 1
-            last_e = (delta_k_next - s + path_k_to_1[i].branch_length)
+            # i -= 1
+            # last_e = (delta_k_next - s + path_k_to_1[i].branch_length)
+            # clade_k_next.branch_length = point_to_path_dist(vecs[co[k+1]], vecs[co[0]], vecs[co[k]])
+            # path_k_to_1[i].branch_length = last_e / 2.0
+            # inter_clade = Clade(branch_length=last_e / 2.0, clades=[path_k_to_1[i], clade_k_next])
+            # path_k_to_1[i+1].clades.remove(path_k_to_1[i])
+            # path_k_to_1[i+1].clades.append(inter_clade)
+
+            ## S < delta_k_next, the tree will not be a bifurcated tree
             clade_k_next.branch_length = point_to_path_dist(vecs[co[k+1]], vecs[co[0]], vecs[co[k]])
-            path_k_to_1[i].branch_length = last_e / 2.0
-            inter_clade = Clade(branch_length=last_e / 2.0, clades=[path_k_to_1[i], clade_k_next])
-            path_k_to_1[i+1].clades.remove(path_k_to_1[i])
-            path_k_to_1[i+1].clades.append(inter_clade)
+            root.clades.append(clade_k_next)
 
         clade_k = clade_k_next
 
     # reroot tree
-    tree.root = root.clades[0]
-    root.clades.clear()
-    tree.root.clades.append(root)
+    if len(root.clades) == 1:
+        tree.root = root.clades[0]
+        root.clades.clear()
+        tree.root.clades.append(root)
+    else:
+        tree.root.name = None
+        tree.root.clades.append(Clade(name=str(co[0]+1), branch_length=0.0))
 
     return tree
 

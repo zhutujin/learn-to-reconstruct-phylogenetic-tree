@@ -46,8 +46,7 @@ class PHYLO(object):
         # Gather vectors in order of tour
         d = vectors.gather(1, pi.unsqueeze(-1).expand_as(vectors))
 
-        # k-mer vector distance
-        # d = d / 0.25
+        ## Euclidean distance
         dists = torch.cat((torch.norm(d[:, 1:] - d[:,:-1], dim=-1),
                           torch.norm(d[:, -1] - d[:, 0], dim=-1).unsqueeze(-1)), dim=1)
         return dists.sum(dim=-1)
